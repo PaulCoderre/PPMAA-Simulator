@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install marimo matplotlib pytest
+      - run: pip install marimo matplotlib pytest uv
       - run: pytest -q
       - run: marimo export html-wasm basin_simulator.py -o _site --mode run
       - uses: actions/upload-pages-artifact@v3
