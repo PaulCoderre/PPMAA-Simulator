@@ -7,110 +7,104 @@ with app.setup:
     import marimo as mo
     import matplotlib.pyplot as plt
 
-    # Three control volumes in series, upstream to downstream
+    # Three provinces in series, upstream to downstream
     # (Saskatchewan–Nelson River basin; Stadnyk 2025, Fig. 1).
     PROVINCES = ("Alberta", "Saskatchewan", "Manitoba")
 
-    # Initial storage S_i by reach, in water units (Stadnyk 2025, Table 1).
-    INITIAL_STORAGE = {"Alberta": 50.0, "Saskatchewan": 75.0, "Manitoba": 100.0}
+    # Saskatchewan and Manitoba each generate half of what Alberta generates,
+    # following the 2:1:1 split of Stadnyk (2025) Table 1 (P_net = 40 / 20 / 20).
+    DOWNSTREAM_GENERATION_RATIO = 0.5
 
-    # Saskatchewan and Manitoba each receive half of Alberta's net input,
-    # preserving the 2:1:1 split of Table 1 (P_net = 40 / 20 / 20).
-    DOWNSTREAM_INPUT_RATIO = 0.5
-
-    # Storage constant k (years). Each year a reach releases 1/k of the water
-    # it holds after withdrawals. k = 2.25 reproduces Table 1 exactly when
-    # nothing is withdrawn: every reach passes on 40 / 60 / 80 units and
-    # its storage stays at 50 / 75 / 100 (a steady-state baseline).
-    STORAGE_CONSTANT_K = 2.25
-
-    # Master Agreement on Apportionment (PPWB 1969): flow crossing a
-    # provincial border must be at least 50% of the natural flow.
+    # Master Agreement on Apportionment (PPWB 1969): at least 50% of the
+    # natural flow must cross each provincial border.
     MAA_MINIMUM_FRACTION_OF_NATURAL_FLOW = 0.5
 
 
 @app.function
-def provincial_net_inputs(alberta_net_input):
-    """Net precipitation P_net for each province, keeping the 2:1:1 split."""
-    downstream_net_input = alberta_net_input * DOWNSTREAM_INPUT_RATIO
+def water_generated_by_province(alberta_water_generated):
+    """Water generated within each province in one year, keeping the 2:1:1 split."""
+    downstream_water_generated = alberta_water_generated * DOWNSTREAM_GENERATION_RATIO
     return {
-        "Alberta": alberta_net_input,
-        "Saskatchewan": downstream_net_input,
-        "Manitoba": downstream_net_input,
+        "Alberta": alberta_water_generated,
+        "Saskatchewan": downstream_water_generated,
+        "Manitoba": downstream_water_generated,
     }
 
 
 @app.function
-def step_reach(initial_storage, net_input, inflow_from_upstream, requested_withdrawal,
-               storage_constant_k=STORAGE_CONSTANT_K):
-    """One annual water balance for a single reach (Stadnyk 2025, Eq. 1):
+def flow_through_reach(inflow_from_upstream, water_generated, requested_withdrawal):
+    """One-year flow-through balance for a province (no storage):
 
-        S_end = S_start + P_net + Q_in - A - Q_out
+        Q_out = Q_in + G - A
 
-    Withdrawal A is taken first and cannot exceed the water on hand.
-    Outflow is then 1/k of what remains, so a withdrawal upstream reduces
-    the flow passed downstream in the same year.
+    The withdrawal A cannot exceed the water available (Q_in + G).
     """
-    water_available = initial_storage + net_input + inflow_from_upstream
+    water_available = inflow_from_upstream + water_generated
     actual_withdrawal = min(max(requested_withdrawal, 0.0), water_available)
-    water_after_withdrawal = water_available - actual_withdrawal
-    outflow = water_after_withdrawal / storage_constant_k
-    end_storage = water_after_withdrawal - outflow
     return {
-        "initial_storage": initial_storage,
-        "net_input": net_input,
         "inflow_from_upstream": inflow_from_upstream,
+        "water_generated": water_generated,
         "water_available": water_available,
         "withdrawal": actual_withdrawal,
-        "outflow": outflow,
-        "end_storage": end_storage,
+        "outflow": water_available - actual_withdrawal,
     }
 
 
 @app.function
-def maa_withdrawal_limit(water_available):
-    """Largest withdrawal that still meets the MAA (option b).
+def maa_withdrawal_limit(water_available, natural_outflow):
+    """Largest withdrawal that still passes 50% of the natural flow downstream.
 
-    Natural outflow (no withdrawal) is water_available / k. The MAA requires
-    actual outflow >= 0.5 x natural outflow, i.e.
-        (water_available - A) / k >= 0.5 x water_available / k
-    which gives  A <= 0.5 x water_available.
+    The MAA requires  Q_out >= 0.5 x natural Q_out, and Q_out = available - A, so
+        A <= available - 0.5 x natural Q_out   (never below zero).
+
+    For Alberta, natural Q_out is the water generated in Alberta.
+    For Saskatchewan, natural Q_out is Alberta's natural flow plus the water
+    generated in Saskatchewan, so any extra Alberta use reduces Saskatchewan's room.
     """
-    return (1.0 - MAA_MINIMUM_FRACTION_OF_NATURAL_FLOW) * water_available
+    return max(0.0, water_available - MAA_MINIMUM_FRACTION_OF_NATURAL_FLOW * natural_outflow)
 
 
 @app.function
-def simulate_basin(alberta_net_input, alberta_requested_withdrawal, maa_enabled):
+def simulate_basin(alberta_water_generated, alberta_withdrawal_percent,
+                   saskatchewan_withdrawal_percent, maa_enabled):
     """Run one year through Alberta -> Saskatchewan -> Manitoba.
 
-    Only Alberta withdraws water, so any change downstream is caused by
-    Alberta's withdrawal or by the net input setting.
+    Withdrawals are given as percentages:
+      - Alberta: % of the water generated in Alberta
+      - Saskatchewan: % of the water available in Saskatchewan (inflow + generated)
+    Manitoba does not withdraw.
     """
-    net_inputs = provincial_net_inputs(alberta_net_input)
-    requested_withdrawals = {"Alberta": alberta_requested_withdrawal,
-                             "Saskatchewan": 0.0, "Manitoba": 0.0}
+    water_generated = water_generated_by_province(alberta_water_generated)
     results = {}
+    requested_withdrawals = {}
+    maa_limits = {}
+
     inflow_from_upstream = 0.0
-    alberta_maa_limit = None
+    natural_outflow = 0.0  # flow that would leave the province with no withdrawals
     for province in PROVINCES:
-        requested = requested_withdrawals[province]
-        if maa_enabled:
-            water_available = (INITIAL_STORAGE[province] + net_inputs[province]
-                               + inflow_from_upstream)
-            limit = maa_withdrawal_limit(water_available)
-            if province == "Alberta":
-                alberta_maa_limit = limit
-            requested = min(requested, limit)
-        reach = step_reach(INITIAL_STORAGE[province], net_inputs[province],
-                           inflow_from_upstream, requested)
+        water_available = inflow_from_upstream + water_generated[province]
+        natural_outflow += water_generated[province]
+
+        if province == "Alberta":
+            requested = alberta_withdrawal_percent / 100 * water_generated[province]
+        elif province == "Saskatchewan":
+            requested = saskatchewan_withdrawal_percent / 100 * water_available
+        else:
+            requested = 0.0
+        requested_withdrawals[province] = requested
+
+        permitted = requested
+        if maa_enabled and province != "Manitoba":
+            maa_limits[province] = maa_withdrawal_limit(water_available, natural_outflow)
+            permitted = min(requested, maa_limits[province])
+
+        reach = flow_through_reach(inflow_from_upstream, water_generated[province], permitted)
+        reach["natural_outflow"] = natural_outflow
         results[province] = reach
         inflow_from_upstream = reach["outflow"]
-    return {
-        "reaches": results,
-        "alberta_requested_withdrawal": alberta_requested_withdrawal,
-        "alberta_permitted_withdrawal": results["Alberta"]["withdrawal"],
-        "alberta_maa_limit": alberta_maa_limit,
-    }
+
+    return {"reaches": results, "requested_withdrawals": requested_withdrawals,
+            "maa_limits": maa_limits}
 
 
 @app.cell
@@ -120,11 +114,12 @@ def _():
 
     A one-year water balance for three provinces in series on the
     Saskatchewan–Nelson River system, simplified from the River Basin Game
-    (Hoekstra 2012; Stadnyk 2025). Alberta is upstream, so whatever Alberta
-    withdraws is water Saskatchewan and Manitoba never receive.
+    (Hoekstra 2012; Stadnyk 2025). Each province passes on whatever it receives
+    plus what it generates, minus what it withdraws. Alberta is upstream, so
+    every unit Alberta takes is a unit Saskatchewan and Manitoba never see.
 
-    **Try it:** raise Alberta's withdrawal and watch the downstream provinces.
-    Then lower the net input to simulate a drought year, and turn on the
+    **Try it:** set Alberta's withdrawal to 100% and see what crosses the border.
+    Then lower the water generated to simulate a drought year, and turn on the
     Master Agreement on Apportionment.
     """)
     return
@@ -132,73 +127,72 @@ def _():
 
 @app.cell
 def _():
-    net_input_slider = mo.ui.slider(
+    water_generated_slider = mo.ui.slider(
         start=0, stop=80, step=1, value=40, show_value=True, full_width=True,
-        label="Alberta net input (Saskatchewan and Manitoba each get half)",
+        label="Water generated in Alberta (Saskatchewan and Manitoba each generate half)",
     )
-    withdrawal_slider = mo.ui.slider(
-        start=0, stop=120, step=1, value=0, show_value=True, full_width=True,
-        label="Alberta withdrawal requested",
+    alberta_withdrawal_slider = mo.ui.slider(
+        start=0, stop=100, step=1, value=0, show_value=True, full_width=True,
+        label="Alberta withdrawal (% of water generated in Alberta)",
+    )
+    saskatchewan_withdrawal_slider = mo.ui.slider(
+        start=0, stop=100, step=1, value=0, show_value=True, full_width=True,
+        label="Saskatchewan withdrawal (% of water available in Saskatchewan)",
     )
     maa_switch = mo.ui.switch(label="Master Agreement on Apportionment (MAA)")
-    mo.vstack([net_input_slider, withdrawal_slider, maa_switch], gap=1.25)
-    return maa_switch, net_input_slider, withdrawal_slider
+    mo.vstack([water_generated_slider, alberta_withdrawal_slider,
+               saskatchewan_withdrawal_slider, maa_switch], gap=1.25)
+    return (alberta_withdrawal_slider, maa_switch, saskatchewan_withdrawal_slider,
+            water_generated_slider)
 
 
 @app.cell
-def _(maa_switch, net_input_slider, withdrawal_slider):
-    scenario = simulate_basin(net_input_slider.value, withdrawal_slider.value,
+def _(alberta_withdrawal_slider, maa_switch, saskatchewan_withdrawal_slider,
+      water_generated_slider):
+    scenario = simulate_basin(water_generated_slider.value,
+                              alberta_withdrawal_slider.value,
+                              saskatchewan_withdrawal_slider.value,
                               maa_switch.value)
-    natural = simulate_basin(net_input_slider.value, 0.0, False)
-    return natural, scenario
+    return (scenario,)
 
 
 @app.cell
 def _(maa_switch, scenario):
-    _requested = scenario["alberta_requested_withdrawal"]
-    _permitted = scenario["alberta_permitted_withdrawal"]
-    _available = scenario["reaches"]["Alberta"]["water_available"]
-    if maa_switch.value and _permitted < _requested:
-        _note = mo.callout(mo.md(
-            f"**MAA in effect.** Alberta requested **{_requested:.0f}** units but may "
-            f"withdraw only **{_permitted:.0f}** (half of the {_available:.0f} units "
-            f"on hand), so at least half the natural flow crosses into Saskatchewan."
-        ), kind="warn")
-    elif _permitted < _requested:
-        _note = mo.callout(mo.md(
-            f"Alberta requested **{_requested:.0f}** units but only "
-            f"**{_available:.0f}** were on hand, so Alberta takes everything available."
-        ), kind="danger")
-    elif maa_switch.value:
-        _note = mo.callout(mo.md(
-            f"**MAA in effect.** Alberta's withdrawal of {_permitted:.0f} is within its "
-            f"limit of {scenario['alberta_maa_limit']:.0f} units."
-        ), kind="info")
-    else:
-        _note = mo.callout(mo.md(
-            f"No apportionment agreement: Alberta withdraws the **{_permitted:.0f}** "
-            f"units it asked for."
+    def _withdrawal_note(province):
+        requested = scenario["requested_withdrawals"][province]
+        permitted = scenario["reaches"][province]["withdrawal"]
+        if maa_switch.value and permitted < requested - 1e-9:
+            return mo.callout(mo.md(
+                f"**{province}: MAA in effect.** Requested **{requested:.1f}** units, "
+                f"permitted **{permitted:.1f}** so that half the natural flow "
+                f"({scenario['reaches'][province]['natural_outflow']:.1f}) crosses the border."
+            ), kind="warn")
+        if maa_switch.value:
+            return mo.callout(mo.md(
+                f"**{province}** withdraws {permitted:.1f} units, within its MAA limit "
+                f"of {scenario['maa_limits'][province]:.1f}."
+            ), kind="info")
+        return mo.callout(mo.md(
+            f"**{province}** withdraws **{permitted:.1f}** units. No apportionment agreement."
         ), kind="neutral")
-    _note
+
+    mo.vstack([_withdrawal_note("Alberta"), _withdrawal_note("Saskatchewan")], gap=0.5)
     return
 
 
 @app.cell
-def _(natural, scenario):
+def _(scenario):
     def _stat(province):
         reach = scenario["reaches"][province]
-        natural_reach = natural["reaches"][province]
+        natural_inflow = reach["natural_outflow"] - reach["water_generated"]
         received = reach["inflow_from_upstream"]
-        natural_received = natural_reach["inflow_from_upstream"]
-        percent = 100 * received / natural_received if natural_received else 0
-        storage_change = reach["end_storage"] - reach["initial_storage"]
+        percent = 100 * received / natural_inflow if natural_inflow else 0
         return mo.stat(
-            value=f"{reach['end_storage']:.0f}",
-            label=f"{province}: water remaining",
-            caption=(f"Received {received:.0f} of {natural_received:.0f} units "
-                     f"from upstream ({percent:.0f}% of natural); "
-                     f"storage change {storage_change:+.0f}"),
-            direction="decrease" if storage_change < -0.5 else None,
+            value=f"{received:.1f}",
+            label=f"{province}: water received from upstream",
+            caption=(f"{percent:.0f}% of the natural {natural_inflow:.1f} units; "
+                     f"plus {reach['water_generated']:.1f} generated locally"),
+            direction="decrease" if percent < 99.5 else None,
             bordered=True,
         )
 
@@ -207,16 +201,16 @@ def _(natural, scenario):
 
 
 @app.cell
-def _(maa_switch, natural, scenario):
+def _(maa_switch, scenario):
     _labels = ["Alberta → Sask.", "Sask. → Manitoba", "Manitoba → Hudson Bay"]
-    _natural_flows = [natural["reaches"][p]["outflow"] for p in PROVINCES]
+    _natural_flows = [scenario["reaches"][p]["natural_outflow"] for p in PROVINCES]
     _scenario_flows = [scenario["reaches"][p]["outflow"] for p in PROVINCES]
 
     _fig, _ax = plt.subplots(figsize=(7.5, 3.6))
     _x = range(len(_labels))
     _width = 0.38
     _ax.bar([i - _width / 2 for i in _x], _natural_flows, _width,
-            label="Natural (no withdrawal)", color="#9db8d3")
+            label="Natural (no withdrawals)", color="#9db8d3")
     _ax.bar([i + _width / 2 for i in _x], _scenario_flows, _width,
             label="This scenario", color="#1f5f8b")
     if maa_switch.value:
@@ -241,14 +235,12 @@ def _(scenario):
     for _province in PROVINCES:
         _r = scenario["reaches"][_province]
         _rows.append(
-            f"| {_province} | {_r['initial_storage']:.1f} | {_r['net_input']:.1f} | "
-            f"{_r['inflow_from_upstream']:.1f} | {_r['withdrawal']:.1f} | "
-            f"{_r['outflow']:.1f} | {_r['end_storage']:.1f} |"
+            f"| {_province} | {_r['inflow_from_upstream']:.1f} | {_r['water_generated']:.1f} | "
+            f"{_r['withdrawal']:.1f} | {_r['outflow']:.1f} | {_r['natural_outflow']:.1f} |"
         )
-    mo.accordion({"Full water balance (S_end = S_start + P_net + Q_in − A − Q_out)": mo.md(
-        "| Province | S_start | P_net | Q_in | A | Q_out | S_end |\n"
-        "|---|---:|---:|---:|---:|---:|---:|\n" + "\n".join(_rows)
-        + f"\n\nQ_out = (S_start + P_net + Q_in − A) / k, with k = {STORAGE_CONSTANT_K}."
+    mo.accordion({"Full water balance (Q_out = Q_in + G − A)": mo.md(
+        "| Province | Q_in | G (generated) | A (withdrawn) | Q_out | Natural Q_out |\n"
+        "|---|---:|---:|---:|---:|---:|\n" + "\n".join(_rows)
     )})
     return
 
