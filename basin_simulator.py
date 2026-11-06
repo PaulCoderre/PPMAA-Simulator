@@ -245,5 +245,22 @@ def _(scenario):
     return
 
 
+@app.cell
+def _():
+    mo.md(r"""
+    ## References
+
+    Hoekstra, A. Y. 2012. "Computer-supported games and role plays in teaching
+    water management." *Hydrol. Earth Syst. Sci.* 16 (8): 2985–2994.
+    [https://doi.org/10.5194/hess-16-2985-2012](https://doi.org/10.5194/hess-16-2985-2012).
+
+    Stadnyk, T. A. 2025. "Water's for Fightin': Lessons on Water Management
+    Learned through Serious Gaming." *Journal of Water Resources Planning and
+    Management* 151 (9): 04025048.
+    [https://doi.org/10.1061/JWRMD5.WRENG-6719](https://doi.org/10.1061/JWRMD5.WRENG-6719).
+    """)
+    return
+
+
 if __name__ == "__main__":
     app.run()
