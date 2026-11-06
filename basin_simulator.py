@@ -127,6 +127,19 @@ def _():
 
 @app.cell
 def _():
+    mo.callout(mo.md(
+        "**Teaching example only.** This is a deliberately simplified model for "
+        "illustrating upstream–downstream water sharing. The flows, the 2:1:1 "
+        "generation split and the treatment of the MAA are stylized: there is no "
+        "storage, no return flow, no evaporation and no real hydrology. Do not use "
+        "it to estimate actual flows, allocations or compliance in the "
+        "Saskatchewan–Nelson basin."
+    ), kind="warn")
+    return
+
+
+@app.cell
+def _():
     water_generated_slider = mo.ui.slider(
         start=0, stop=80, step=1, value=40, show_value=True, full_width=True,
         label="Water generated in Alberta (Saskatchewan and Manitoba each generate half)",
